@@ -394,6 +394,16 @@ Note: some register bitfields are defined in reg_clockglitch.v and reg_chipwhisp
 //`define UNUSED_ADDRESS 87
 //`define UNUSED_ADDRESS 109
 
+// OLED framebuffer slave (reg_sca_display.v) — Ledger Nano X SE bench.
+// MAIN CW bank only (reg_address[7:6] = 00/01, i.e. 0-127): 128-191 is the
+// TW_MAIN bank and 192-255 the TW_TRACE bank (reg_trace decodes [7:6]==11),
+// so those collide. Use the documented free main-bank holes.
+`define DISP_STATUS             85
+`define DISP_PAGESEL            86
+`define DISP_DATA               87
+`define DISP_GAP_THRESH         94
+`define DISP_CONTROL            97
+
 `define REGISTER_VERSION 2
 
 `define TW_MAIN_REG_SELECT      2'b10

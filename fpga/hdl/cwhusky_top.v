@@ -155,9 +155,20 @@ module cwhusky_top(
    `ifdef __ICARUS__
       assign clk_usb_buf = clk_usb;
    `else
+      // IBUFG brings the USB clock into the fabric; a global BUFG is required to
+      // put it on the clock network. NewAE's flow relied on Vivado auto-inserting
+      // this BUFG, but Vivado 2026.1 does not (clk_usb_buf is also used as a debug
+      // data bit below, which suppresses auto clock-buffer insertion), leaving the
+      // 96 MHz clock on general routing with ~14 ns skew and breaking the whole
+      // clk_usb domain. Instantiate the BUFG explicitly.
+      wire clk_usb_ibuf;
       IBUFG IBUFG_usb_inst (
-         .O(clk_usb_buf),
+         .O(clk_usb_ibuf),
          .I(clk_usb)
+      );
+      BUFG BUFG_usb_inst (
+         .O(clk_usb_buf),
+         .I(clk_usb_ibuf)
       );
    `endif
 
@@ -181,7 +192,8 @@ module cwhusky_top(
    wire [7:0] read_data_la;
    wire [7:0] read_data_trace;
    wire [7:0] read_data_bb_trig;
-   always @(posedge clk_usb_buf) read_data_reg <= read_data_openadc | read_data_cw | read_data_adc | read_data_glitch | read_data_xadc | read_data_la | read_data_trace | read_data_userio | read_data_bb_trig;
+   wire [7:0] read_data_disp;    // OLED framebuffer slave (reg_sca_display)
+   always @(posedge clk_usb_buf) read_data_reg <= read_data_openadc | read_data_cw | read_data_adc | read_data_glitch | read_data_xadc | read_data_la | read_data_trace | read_data_userio | read_data_bb_trig | read_data_disp;
    //always @(*) read_data_reg = read_data_openadc | read_data_cw | read_data_adc | read_data_glitch | read_data_xadc | read_data_la;
    assign read_data = (reg_address == `ADCREAD_ADDR)? fifo_dout : read_data_reg;
 
@@ -821,6 +833,27 @@ module cwhusky_top(
        assign la_exists = 0;
    `endif
 `endif // SAD_ONLY
+
+   // -------------------------------------------------------------------
+   // OLED framebuffer slave (Ledger Nano X SE bench): a live mirror of
+   // the SE's SSD1306 panel, tapped from the target IO pins. See
+   // hdl/reg_sca_display.v. Taps TIO1/TIO2/TIO4 (OLED_CLK/DIN/DC).
+   // -------------------------------------------------------------------
+   reg_sca_display #(
+        .pBYTECNT_SIZE  (pBYTECNT_SIZE)
+   ) reg_sca_display (
+        .reset          (reg_rst),
+        .clk_usb        (clk_usb_buf),
+        .reg_address    (reg_address),
+        .reg_bytecnt    (reg_bytecnt),
+        .reg_datai      (write_data),
+        .reg_datao      (read_data_disp),
+        .reg_read       (reg_read),
+        .reg_write      (reg_write),
+        .oled_sclk      (target_io1),   // TIO1 = OLED_CLK
+        .oled_mosi      (target_io2),   // TIO2 = OLED_DIN
+        .oled_dc        (target_io4)    // TIO4 = OLED_DC
+   );
 
    wire target_highz = target_npower;
    assign target_poweron = ~target_npower;
