@@ -387,7 +387,12 @@ Note: some register bitfields are defined in reg_clockglitch.v and reg_chipwhisp
 //`define UNUSED_ADDRESS 47
 //`define UNUSED_ADDRESS 70
 //`define UNUSED_ADDRESS 85
-//`define UNUSED_ADDRESS 106
+`define DISP_DC_DELAY           106
+// reg_seph_terminal (FPGA-side SE bring-up + SEPROXYHAL MCU)
+`define SEPH_CMD                 28
+`define SEPH_CTRL                47
+`define SEPH_STATUS              70
+`define SEPH_ATR                109
 //`define UNUSED_ADDRESS 94
 //`define UNUSED_ADDRESS 97
 //`define UNUSED_ADDRESS 86

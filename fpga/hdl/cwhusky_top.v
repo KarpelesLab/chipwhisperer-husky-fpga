@@ -193,7 +193,7 @@ module cwhusky_top(
    wire [7:0] read_data_trace;
    wire [7:0] read_data_bb_trig;
    wire [7:0] read_data_disp;    // OLED framebuffer slave (reg_sca_display)
-   always @(posedge clk_usb_buf) read_data_reg <= read_data_openadc | read_data_cw | read_data_adc | read_data_glitch | read_data_xadc | read_data_la | read_data_trace | read_data_userio | read_data_bb_trig | read_data_disp;
+   always @(posedge clk_usb_buf) read_data_reg <= read_data_openadc | read_data_cw | read_data_adc | read_data_glitch | read_data_xadc | read_data_la | read_data_trace | read_data_userio | read_data_bb_trig | read_data_disp | read_data_seph;
    //always @(*) read_data_reg = read_data_openadc | read_data_cw | read_data_adc | read_data_glitch | read_data_xadc | read_data_la;
    assign read_data = (reg_address == `ADCREAD_ADDR)? fifo_dout : read_data_reg;
 
@@ -572,7 +572,7 @@ module cwhusky_top(
 
         .auxio                  (AUXIO),
         .target_hs1             (target_hs1),
-        .target_hs2             (target_hs2),
+        .target_hs2             (cw_hs2),
         .extclk_o               (extclk_mux),
         .target_clk             (target_clk),
         .trigger_io1_i          (target_io1),
@@ -837,8 +837,17 @@ module cwhusky_top(
    // -------------------------------------------------------------------
    // OLED framebuffer slave (Ledger Nano X SE bench): a live mirror of
    // the SE's SSD1306 panel, tapped from the target IO pins. See
-   // hdl/reg_sca_display.v. Taps TIO1/TIO2/TIO4 (OLED_CLK/DIN/DC).
+   // hdl/reg_sca_display.v. Taps TIO1/TIO2/TIO4 (OLED_CLK/DIN/CS) + HS1 (D/C).
+   //
+   // D/C is on target_hs1, which has a create_clock and is routed on the global
+   // CLOCK network (for the clock-measure feature). Sampling a data signal off
+   // the clock tree jittered the per-byte D/C read. A dont_touch LUT1 pass-
+   // through makes a SEPARATE, data-routed copy of the pin so the D/C samples
+   // through ordinary logic routing like TIO1/TIO2, not the clock buffer.
    // -------------------------------------------------------------------
+   (* dont_touch = "true" *) wire oled_dc_data;
+   LUT1 #(.INIT(2'b10)) u_oled_dc_buf (.O(oled_dc_data), .I0(target_hs1));
+
    reg_sca_display #(
         .pBYTECNT_SIZE  (pBYTECNT_SIZE)
    ) reg_sca_display (
@@ -852,17 +861,64 @@ module cwhusky_top(
         .reg_write      (reg_write),
         .oled_sclk      (target_io1),   // TIO1 = OLED_CLK
         .oled_mosi      (target_io2),   // TIO2 = OLED_DIN
-        .oled_dc        (target_io4)    // TIO4 = OLED_DC
+        .oled_cs        (target_io4),   // TIO4 = OLED_CS
+        .oled_dc        (oled_dc_data)  // HS1  = OLED_DC (data-routed copy)
    );
 
+   // -------------------------------------------------------------------
+   // reg_seph_terminal: the Husky becomes the SE's MCU in hardware. When
+   // SEPH_CTRL[0] (seph_enable) is set, its clk_card/vcc_en/rst_card/io are
+   // muxed onto target_hs2/target_poweron/target_PDIC/target_io3 (below), so
+   // the FPGA powers/clocks/ATRs/PPSes the SE and services SEPROXYHAL forever.
+   // The host sets scope.io.hs2=None (clkgen off) and releases tio3 (high_z)
+   // before enabling, so the ChipWhisperer drivers are hi-Z.
+   // -------------------------------------------------------------------
+   wire [7:0] read_data_seph;
+   wire seph_enable, seph_clk_card, seph_vcc_en, seph_rst_card, seph_io_oe, seph_io_o;
+   reg_seph_terminal #(
+        .pBYTECNT_SIZE  (pBYTECNT_SIZE)
+   ) reg_seph_terminal (
+        .reset          (reg_rst),
+        .clk_usb        (clk_usb_buf),
+        .reg_address    (reg_address),
+        .reg_bytecnt    (reg_bytecnt),
+        .reg_datai      (write_data),
+        .reg_datao      (read_data_seph),
+        .reg_read       (reg_read),
+        .reg_write      (reg_write),
+        .seph_enable    (seph_enable),
+        .clk_card       (seph_clk_card),
+        .vcc_en         (seph_vcc_en),
+        .rst_card       (seph_rst_card),
+        .io_oe          (seph_io_oe),
+        .io_o           (seph_io_o),
+        .io_i           (target_io3)
+   );
+   // Terminal drives the SE UART on TIO3 (open-drain: pulls low or hi-Z) when
+   // enabled; the ChipWhisperer's own TIO3 driver must be released by the host.
+   assign target_io3 = (seph_enable & seph_io_oe) ? seph_io_o : 1'bz;
+
+   // target_hs2 (SE clock): on this bench HS2 is dedicated to the SE clock, and
+   // the FPGA terminal owns it. seph_clk_card is a general-routed divided toggle
+   // (clk_usb/12 = 8 MHz), NOT a global clock net, so it drives the OBUF directly
+   // with no clock resource. We deliberately do NOT mux the ChipWhisperer clkgen
+   // (cw_hs2) onto the pin: feeding that BUFG-driven clock through a fabric LUT
+   // mux breaks its dedicated IO-clock route ("IO Clock Placer failed"). cw_hs2
+   // stays an internal wire (reg_chipwhisperer's hs2 logic is trimmed) so the
+   // instance port keeps its connection. When seph is disabled the SE clock is
+   // simply held low, which is fine (this build is only used with seph enabled).
+   wire cw_hs2;  // reg_chipwhisperer clkgen output; intentionally not on the pin
+   assign target_hs2 = seph_clk_card;
+
    wire target_highz = target_npower;
-   assign target_poweron = ~target_npower;
+   assign target_poweron = seph_enable ? seph_vcc_en : ~target_npower;
 
    assign target_PDID = (target_highz) ? 1'bZ :
                         (userio_target_debug & userio_target_debug_swd & ~USERIO_CLK) ? USERIO_D[6] :
                         (enable_output_pdid) ? output_pdid : 1'bZ;
 
-   assign target_PDIC = (target_highz) ? 1'bZ:
+   assign target_PDIC = seph_enable ? seph_rst_card :      // HIGH=run, LOW=reset
+                        (target_highz) ? 1'bZ:
                         (enable_output_pdic) ? output_pdic : 1'bZ;
 
    assign target_nRST = (target_highz && ~nrst_ignore_highz) ? 1'bZ :
