@@ -55,13 +55,15 @@ counters in `DISP_STATUS` let a host confirm a clean decode and tune
 
 ## Building (Vivado 2026.1)
 
-The committed `cwhusky_plus.xpr` references NewAE's private `plus_optimization`
-repo and won't open in a current Vivado. Those are the `TINYFIFO`/`SEMIPRO`
-IP variants, used only when those defines are set; the Plus build
-(`PLUS INTERVAL_MATCHING=1 ESAD`) uses the in-tree IP. So build a **fresh
-project** from the in-tree `develop` sources — `fpga/vivado/build_oled.tcl` does
-this (part `xc7a100tftg256-3`, top `cwhusky_top`, XPM libs,
-`Performance_Retiming`).
+The committed `cwhusky_plus.xpr` still points at a stale sibling
+`../../../plus_optimization/...` directory for a number of IP — that's the
+pre-merge local checkout of the `plus_optimization` *branch*, which is merged
+into `develop`, so the sources are in-tree now and only the paths are stale.
+`open_project` fails on the missing paths, but a **fresh project** built from
+the in-tree `develop` sources works (the Plus defines `PLUS INTERVAL_MATCHING=1
+ESAD`, without `TINYFIFO`/`SEMIPRO`, select the in-tree IP).
+`fpga/vivado/build_oled.tcl` does this (part `xc7a100tftg256-3`, top
+`cwhusky_top`, XPM libs, `Performance_Retiming`).
 
 Fixes this fork needed to build/close timing in 2026.1 (see the commits):
 
@@ -75,9 +77,10 @@ Fixes this fork needed to build/close timing in 2026.1 (see the commits):
 2. **Clock-mux cascades** — NewAE's chained BUFGMUX clock selects
    (glitch/LA/trace) need `CLOCK_DEDICATED_ROUTE ANY_CMT_COLUMN` overrides
    (exactly Vivado's suggested workarounds), in `cwhusky_100.xdc`.
-3. `fifo_generator_semipro` (used by the trace FIFO under `` `elsif PLUS ``) is
-   not in-tree; here it's a renamed copy of the in-tree `fifo_generator_0`
-   (identical ports).
+3. `fifo_generator_semipro` (used by the trace FIFO under `` `elsif PLUS ``) has
+   no `.xci` in `develop` — looks like it didn't get committed with the rest of
+   the merged branch. Here it's a renamed copy of the in-tree `fifo_generator_0`
+   (identical ports; trace is unused on this bench).
 
 ## Host readout
 
