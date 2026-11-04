@@ -109,8 +109,10 @@ module reg_sca_display #(
                                    // << ~1 s inter-frame gap. Tunable at runtime.
          page_sel    <= 5'd0;
          soft_rst    <= 1'b0;
-         dc_delay    <= 6'd0;       // glitch-filter depth (sweep at runtime)
-         use_real_dc <= 1'b0;
+         dc_delay    <= 6'd4;       // sclk glitch-filter depth ON by default
+                                    // (K~=4 @96MHz removes the CLK ringing that
+                                    // added extra edges -> pixel-perfect bytes)
+         use_real_dc <= 1'b1;       // real D/C tag ON (clean now the resistor's gone)
       end
       else begin
          soft_rst <= 1'b0;         // one-cycle pulse
@@ -299,13 +301,15 @@ module reg_sca_display #(
    );
 
    // ------------------------------------------------------------------
-   // Our own byte recovery, framed by CS. Shift MOSI in on each sclk rising edge
-   // (MSB first); CS falling (cs_fall) marks the byte start, which reliably
-   // brackets exactly 8 sclk rises per byte (far more robust than the inter-byte
-   // idle gap, which dropped 5-11 bytes/page). A `pending_reset` latch makes the
-   // byte-start apply to the NEXT sampled bit, so a CS/gap event coinciding with
-   // an sclk edge is handled cleanly. byte_gap_enter is a fallback if CS is
-   // missed. real D/C is latched at the 8th bit (the SSD1306 spec instant).
+   // Byte recovery: GAP-REFRAME + emit-every-8. Shift MOSI in on each FILTERED
+   // sclk rising edge (MSB first); emit a byte every 8 rises, and resync the bit
+   // counter to a byte boundary on the inter-byte idle gap (byte_gap_enter). With
+   // the sclk glitch filter ON (dc_delay~=4 removes the CLK ringing that added
+   // extra edges) this recovers the bytes PIXEL-PERFECT -- validated bit-for-bit
+   // against the 96 MHz wire capture (`60 d5 20 81 42 a6 c0 a1 b0 ...`). The gap
+   // (not CS) frames: CS-window framing dropped held-CS bytes and CS ringing
+   // doubled bytes; the gap is robust and emit-every-8 handles any run length.
+   // real D/C (clean now the resistor's gone) is latched at the 8th bit.
    // ------------------------------------------------------------------
    reg        sclk_d_q2;
    always @(posedge clk_usb) sclk_d_q2 <= sclk_f;
@@ -315,21 +319,16 @@ module reg_sca_display #(
    reg  [3:0] bitcnt;
    reg  [7:0] rx_byte;
    reg        rx_valid, rx_is_data;
-   reg        pending_reset;
    always @(posedge clk_usb) begin
       rx_valid <= 1'b0;                       // 1-cycle strobe
       if (!sub_rst_n) begin
-         bitcnt <= 4'd0; shreg <= 8'd0; pending_reset <= 1'b0;
+         bitcnt <= 4'd0; shreg <= 8'd0;
       end
       else begin
-         if (cs_fall || byte_gap_enter) pending_reset <= 1'b1;  // next bit is bit0
+         if (byte_gap_enter) bitcnt <= 4'd0;  // inter-byte gap -> resync boundary
          if (sclk_rise) begin
             shreg <= {shreg[6:0], mosi_f};
-            if (pending_reset) begin
-               bitcnt        <= 4'd1;         // this sample is bit 0
-               pending_reset <= 1'b0;
-            end
-            else if (bitcnt == 4'd7) begin
+            if (bitcnt == 4'd7) begin
                rx_byte    <= {shreg[6:0], mosi_f};
                rx_is_data <= dc_clean;        // D/C at the 8th (last) bit
                rx_valid   <= 1'b1;
