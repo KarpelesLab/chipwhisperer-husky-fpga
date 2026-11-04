@@ -388,6 +388,10 @@ Note: some register bitfields are defined in reg_clockglitch.v and reg_chipwhisp
 //`define UNUSED_ADDRESS 70
 //`define UNUSED_ADDRESS 85
 `define DISP_DC_DELAY           106
+// reg_sca_display raw-byte ring is folded into DISP_PAGESEL/DISP_DATA/DISP_STATUS
+// (no free addresses: 0-127 all claimed, >=128 collides with TraceWhisperer).
+// DISP_PAGESEL bit4 = raw-mode; bits[3:0] = 128-byte chunk 0..15 (2048 bytes).
+// DISP_DATA then returns raw_buf; DISP_STATUS[16..17] = raw_wptr + full flag.
 // reg_seph_terminal (FPGA-side SE bring-up + SEPROXYHAL MCU)
 `define SEPH_CMD                 28
 `define SEPH_CTRL                47
