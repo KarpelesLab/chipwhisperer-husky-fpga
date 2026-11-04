@@ -109,9 +109,7 @@ module reg_sca_display #(
                                    // << ~1 s inter-frame gap. Tunable at runtime.
          page_sel    <= 5'd0;
          soft_rst    <= 1'b0;
-         dc_delay    <= 6'd4;       // sclk glitch-filter depth ON by default
-                                    // (K~=4 @96MHz removes the CLK ringing that
-                                    // added extra edges -> pixel-perfect bytes)
+         dc_delay    <= 6'd4;       // sclk/mosi debounce depth (tunable, DISP_DC_DELAY)
          use_real_dc <= 1'b1;       // real D/C tag ON (clean now the resistor's gone)
       end
       else begin
@@ -138,16 +136,20 @@ module reg_sca_display #(
    // first.)  spi_display_rx re-synchronises internally too; a clean
    // input simply keeps its instrumentation honest.
    // ------------------------------------------------------------------
-   reg [1:0] sclk_sync, mosi_sync, cs_sync, dc_sync;
+   // First capture in the IOB input register (like the Husky LA, which taps the
+   // pin via its IOB and decodes clean) -- a fabric 2-FF sync of the slow async
+   // sclk ramp added extra edges. Then one more fabric FF (metastability sync).
+   (* IOB = "TRUE" *) reg sclk_iob, mosi_iob, cs_iob;
+   reg sclk_sync, mosi_sync, cs_sync;
+   reg [1:0] dc_sync;                 // dc is a LUT copy (HS1) -> no IOB packing
    always @(posedge clk_usb) begin
-      sclk_sync <= {sclk_sync[0], oled_sclk};
-      mosi_sync <= {mosi_sync[0], oled_mosi};
-      cs_sync   <= {cs_sync[0],   oled_cs};
-      dc_sync   <= {dc_sync[0],   oled_dc};
+      sclk_iob <= oled_sclk;  mosi_iob <= oled_mosi;  cs_iob <= oled_cs;
+      sclk_sync <= sclk_iob;  mosi_sync <= mosi_iob;  cs_sync <= cs_iob;
+      dc_sync   <= {dc_sync[0], oled_dc};
    end
-   wire sclk_clean = sclk_sync[1];
-   wire mosi_clean = mosi_sync[1];
-   wire cs_clean   = cs_sync[1];
+   wire sclk_clean = sclk_sync;
+   wire mosi_clean = mosi_sync;
+   wire cs_clean   = cs_sync;
    wire dc_clean   = dc_sync[1];
 
    // ------------------------------------------------------------------
@@ -179,51 +181,29 @@ module reg_sca_display #(
    // (FRAME_MODE=0 closed bytes at 7/9 bits); it is left connected for the
    // instrumentation but framing does not depend on it.
    // ------------------------------------------------------------------
-   // Glitch filter on the synced sclk. The fabric input sees multiple threshold
-   // crossings (ringing) on the slow ~1.6 MHz OLED sclk edges; a direct LA tap
-   // and the 200 MHz SLogic16 see clean edges, but the FPGA input toggles, which
-   // over-frames the bytes. Require the level to hold SCLK_FILT clk periods
-   // before the filtered copy follows -> exactly one clean edge per real
-   // transition. (Validated: the recovery algorithm on a clean 96 MHz capture
-   // recovers the bytes exactly; only the fabric input needs this filter.) High/
-   // low sclk times are ~20/38 clk, far above the filter, so no real edge is lost.
-   // SCLK_FILT is runtime-tunable via the (otherwise unused) dc_delay register
-   // (DISP_DC_DELAY), so the filter depth can be swept on hardware without a
-   // rebuild. 0 = no filtering.
+   // Consecutive-stable debounce on the synced sclk/mosi -- but the KEY is that
+   // the first capture is now an IOB register (see sclk_sync above): the LA taps
+   // the pin via its IOB and decodes clean, while our old FABRIC 2-FF sync of the
+   // slow async-sclk ramp added extra edges -> byte doubling. IOB capture + this
+   // debounce (K via DISP_DC_DELAY) matches the LA's clean view. hi/low times are
+   // ~13-20 / ~24-38 clk, far above K, so no real edge is lost.
    wire [5:0] sclk_filt = dc_delay;
-   reg [5:0] sclk_fcnt;
-   reg       sclk_f;
+   reg [5:0] sclk_fcnt; reg sclk_f;
    always @(posedge clk_usb) begin
-      if (!sub_rst_n)                    begin sclk_f <= 1'b0; sclk_fcnt <= 6'd0; end
-      else if (sclk_d == sclk_f)         sclk_fcnt <= 6'd0;
-      else if (sclk_fcnt >= sclk_filt)   begin sclk_f <= sclk_d; sclk_fcnt <= 6'd0; end
-      else                               sclk_fcnt <= sclk_fcnt + 6'd1;
+      if (!sub_rst_n)                  begin sclk_f <= 1'b0; sclk_fcnt <= 6'd0; end
+      else if (sclk_d == sclk_f)       sclk_fcnt <= 6'd0;
+      else if (sclk_fcnt >= sclk_filt) begin sclk_f <= sclk_d; sclk_fcnt <= 6'd0; end
+      else                             sclk_fcnt <= sclk_fcnt + 6'd1;
    end
-   // Matching debounce on MOSI so it stays aligned with the (filter-delayed)
-   // sclk_f edge and its own ringing is rejected. Sampled as mosi_f at sclk_rise.
-   reg [5:0] mosi_fcnt;
-   reg       mosi_f;
+   reg [5:0] mosi_fcnt; reg mosi_f;
    always @(posedge clk_usb) begin
-      if (!sub_rst_n)                    begin mosi_f <= 1'b0; mosi_fcnt <= 6'd0; end
-      else if (mosi_d == mosi_f)         mosi_fcnt <= 6'd0;
-      else if (mosi_fcnt >= sclk_filt)   begin mosi_f <= mosi_d; mosi_fcnt <= 6'd0; end
-      else                               mosi_fcnt <= mosi_fcnt + 6'd1;
+      if (!sub_rst_n)                  begin mosi_f <= 1'b0; mosi_fcnt <= 6'd0; end
+      else if (mosi_d == mosi_f)       mosi_fcnt <= 6'd0;
+      else if (mosi_fcnt >= sclk_filt) begin mosi_f <= mosi_d; mosi_fcnt <= 6'd0; end
+      else                             mosi_fcnt <= mosi_fcnt + 6'd1;
    end
-   // Debounce on CS (the 1k-coupled per-byte frame). CS reliably pulses once per
-   // byte (bracketing exactly 8 sclk rises), so its FALLING edge is the byte
-   // start -- a far more robust frame than the inter-byte idle gap, which dropped
-   // 5-11 bytes/page. Debounced with the same runtime depth.
-   reg [5:0] cs_fcnt;
-   reg       cs_f;
-   always @(posedge clk_usb) begin
-      if (!sub_rst_n)                    begin cs_f <= 1'b1; cs_fcnt <= 6'd0; end
-      else if (cs_d == cs_f)             cs_fcnt <= 6'd0;
-      else if (cs_fcnt >= sclk_filt)     begin cs_f <= cs_d; cs_fcnt <= 6'd0; end
-      else                               cs_fcnt <= cs_fcnt + 6'd1;
-   end
-   reg cs_f_q;
-   always @(posedge clk_usb) cs_f_q <= cs_f;
-   wire cs_fall = ~cs_f & cs_f_q;   // CS 1->0 : start of a byte
+   wire cs_f = cs_d;                   // CS unused by the gap-reframe recovery
+   wire cs_fall = 1'b0;
 
    reg sclk_d_q;
    always @(posedge clk_usb) sclk_d_q <= sclk_f;
