@@ -187,7 +187,14 @@ module reg_sca_display #(
    // slow async-sclk ramp added extra edges -> byte doubling. IOB capture + this
    // debounce (K via DISP_DC_DELAY) matches the LA's clean view. hi/low times are
    // ~13-20 / ~24-38 clk, far above K, so no real edge is lost.
-   wire [5:0] sclk_filt = dc_delay;
+   // SCLK glitch-filter depth K is now RUNTIME-tunable via DISP_DC_DELAY[5:4] (0..3).
+   // K is the clk_usb cycles SCLK must hold a new level before sclk_f follows it: it
+   // DELAYS the detected edge by ~K cycles, which pushes the MOSI sample LATER into the
+   // bit. The Husky LA (same pins, pixel-perfect) detects the edge from a coarse record
+   // and samples MOSI EARLY; the fabric's K=4 floor sampled too late, catching MOSI as
+   // it began sliding to the next bit at tight-hold blank->glyph transitions. K=0 makes
+   // sclk_f follow sclk_d in 1 cycle = earliest edge (SCLK is clean: no ringing per LA).
+   wire [5:0] sclk_filt = {4'b0, dc_delay[5:4]};
    reg [5:0] sclk_fcnt; reg sclk_f;
    always @(posedge clk_usb) begin
       if (!sub_rst_n)                  begin sclk_f <= 1'b0; sclk_fcnt <= 6'd0; end
@@ -202,8 +209,23 @@ module reg_sca_display #(
       else if (mosi_fcnt >= sclk_filt) begin mosi_f <= mosi_d; mosi_fcnt <= 6'd0; end
       else                             mosi_fcnt <= mosi_fcnt + 6'd1;
    end
-   wire cs_f = cs_d;                   // CS unused by the gap-reframe recovery
-   wire cs_fall = 1'b0;
+   // CS glitch filter (mirrors sclk_f/mosi_f). The Nano X pulses CS (active-low)
+   // once PER BYTE -- each CS-low interval bounds exactly 8 sclk rises = one byte.
+   // With the 1k series Rs removed, CS is clean (the LA decoder frames on it bit-
+   // for-bit); this K-filter rejects any residual edge ringing before framing.
+   reg [5:0] cs_fcnt; reg cs_ff;
+   always @(posedge clk_usb) begin
+      if (!sub_rst_n)                begin cs_ff <= 1'b1; cs_fcnt <= 6'd0; end
+      else if (cs_d == cs_ff)        cs_fcnt <= 6'd0;
+      else if (cs_fcnt >= 6'd4)      begin cs_ff <= cs_d; cs_fcnt <= 6'd0; end  // CS filter fixed at K=4
+      else                           cs_fcnt <= cs_fcnt + 6'd1;
+   end
+   reg  cs_ff_q;
+   always @(posedge clk_usb) cs_ff_q <= cs_ff;
+   wire cs_fall_e = ~cs_ff &  cs_ff_q;   // CS 1->0 : a new byte frame begins
+   wire cs_rise_e =  cs_ff & ~cs_ff_q;   // CS 0->1 : the byte frame closes -> emit
+   wire cs_f = cs_ff;
+   wire cs_fall = cs_fall_e;
 
    reg sclk_d_q;
    always @(posedge clk_usb) sclk_d_q <= sclk_f;
@@ -295,6 +317,27 @@ module reg_sca_display #(
    always @(posedge clk_usb) sclk_d_q2 <= sclk_f;
    wire sclk_rise = sclk_f & ~sclk_d_q2;   // rising edge of the FILTERED sclk
 
+   // Sample MOSI/DC in the MIDDLE of the sclk HIGH pulse, `dc_delay` clk_usb cycles AFTER
+   // the (glitch-filtered) sclk rising edge. From the visgrok wire dump: the SE sets the
+   // FIRST bit of each byte only ~105 ns before the first sclk edge (vs ~200 ns for the
+   // rest, which change on the falling edge), so sampling AT the edge caught the first bit
+   // mid-RC-ramp -> the bit-7-dominant errors. The high pulse is ~200 ns, so a ~100 ns
+   // delay (dc_delay~=10 @96MHz) lands on FULLY-SETTLED MOSI for every bit incl. the first.
+   // Sweep dc_delay (DISP_DC_DELAY, 0..31) at runtime to centre it in the high pulse.
+   reg [31:0] rise_dl;
+   always @(posedge clk_usb) rise_dl <= {rise_dl[30:0], sclk_rise};
+   wire sample_now = rise_dl[dc_delay[3:0]];   // sample phase = DISP_DC_DELAY[3:0] (0..15)
+   wire mosi_s = mosi_clean;              // settled by now (sampled mid-high-pulse)
+   wire dc_s   = dc_clean;
+
+   // CS-FRAMED byte recovery (replaces the free-run emit-every-8). Each CS-low
+   // interval is exactly one byte: reset the shift reg on CS fall, shift MOSI in on
+   // every (settled) sclk sample while CS is low, and EMIT the byte when CS rises.
+   // Because the byte is bounded by its own CS pulse, a miscounted sclk edge can
+   // corrupt at most THAT byte -- it can NEVER shift the column alignment of the
+   // rest of the frame (the free-run counter's failure mode: one lost edge relocated
+   // every following byte by a column until the next-frame realign). D/C is latched
+   // at CS rise (stable for the whole byte). bitcnt is kept only for diagnostics.
    reg  [7:0] shreg;
    reg  [3:0] bitcnt;
    reg  [7:0] rx_byte;
@@ -305,16 +348,17 @@ module reg_sca_display #(
          bitcnt <= 4'd0; shreg <= 8'd0;
       end
       else begin
-         if (byte_gap_enter) bitcnt <= 4'd0;  // inter-byte gap -> resync boundary
-         if (sclk_rise) begin
-            shreg <= {shreg[6:0], mosi_f};
-            if (bitcnt == 4'd7) begin
-               rx_byte    <= {shreg[6:0], mosi_f};
-               rx_is_data <= dc_clean;        // D/C at the 8th (last) bit
-               rx_valid   <= 1'b1;
-               bitcnt     <= 4'd0;
-            end
-            else bitcnt <= bitcnt + 4'd1;
+         if (cs_fall_e) begin                 // new byte frame: clear accumulator
+            bitcnt <= 4'd0; shreg <= 8'd0;
+         end
+         else if (sample_now && !cs_ff) begin // shift bits only while CS is asserted
+            shreg  <= {shreg[6:0], mosi_s};    // MOSI sampled mid-high-pulse (settled)
+            bitcnt <= bitcnt + 4'd1;
+         end
+         if (cs_rise_e) begin                 // frame close -> emit the completed byte
+            rx_byte    <= shreg;              // all 8 bits shifted during CS-low
+            rx_is_data <= dc_s;               // D/C stable across the byte
+            rx_valid   <= 1'b1;
          end
       end
    end
@@ -419,7 +463,7 @@ module reg_sca_display #(
    wire [15:0] panel_frames, panel_cmds, panel_datas;
 
    ssd1306_slave #(
-      .COLUMNS(128), .PAGES(8), .COUNT_WIDTH(16), .BLOCK_RAM(1)
+      .COLUMNS(128), .PAGES(8), .COUNT_WIDTH(16), .BLOCK_RAM(0)  // 0 = async LUT read (0-latency, no DWORD skip)
    ) u_panel (
       .clk(clk_usb), .rst_n(sub_rst_n),
       .in_byte(rx_byte), .in_is_data(fb_is_data), .in_valid(rx_valid), // real-DC or structural

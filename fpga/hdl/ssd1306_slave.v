@@ -258,17 +258,22 @@ module ssd1306_slave #(
         end else begin : as_lut
             (* ram_style = "distributed" *)
             reg [7:0] mem [0:WORDS-1];
-            reg [7:0] q;
             always @(posedge clk) begin
                 if (wr_en) mem[wr_addr] <= wr_data;
-                q <= mem[rd_addr[ADDR_BITS-1:0]];
             end
-            assign rd_q = q;
+            // ASYNC (combinational) read: distributed/LUT RAM supports it, so
+            // rd_data tracks rd_addr with ZERO latency. The block-RAM branch's
+            // 1-cycle read latency interacts with the CW USB register bus's 4-byte
+            // burst timing (reg_bytecnt advances per byte, but the DWORD-boundary
+            // byte settles a cycle earlier) and SKIPS one column per 4-byte word on
+            // readout. A 0-latency read makes reg_datao = mem[reg_bytecnt] uniformly,
+            // exactly like the combinational gap_thresh/status reads, so the host
+            // reads all COLUMNS straight with no drop-first and no periodic skip.
+            assign rd_q = mem[rd_addr[ADDR_BITS-1:0]];
         end
     endgenerate
 
-    // Registered inside the generate, so the latency is the same either
-    // way: one clock from `rd_addr` to `rd_data`.
+    // Block-RAM branch: 1 clock from rd_addr to rd_data. LUT branch: 0 (async).
     assign rd_data = rd_q;
 
     // ---- State the commands set. ----
