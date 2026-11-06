@@ -27,13 +27,18 @@ seph_mcu, 'm'=0x6D mute, 'D'=0x44 deactivate. Minimal boot: A,(read ATR),P,
 Register map (clk_usb domain, big-OR readback):
   SEPH_CMD     write: one command byte -> cmd_valid pulse to the terminal
   SEPH_CTRL    write bit0 = enable (hand the SE pins to the FPGA terminal)
-               read back bit0
+                     bit1 = rsp_page (which 128-B half SEPH_ATR returns)
+               read back {rsp_page, enable}
   SEPH_STATUS  read, muxed by reg_bytecnt:
                  0: {seph_active,seph_started,card_active,2'b0,state[2:0]}
                  1: seph_last_tag
                  2..3: card_bytes (16-bit LE, total card bytes seen)
                  4: {3'b0, atr_count[4:0]}
-  SEPH_ATR     read 16 bytes = ATR capture buffer[reg_bytecnt]
+                 5: rsp_wptr[7:0]  (response-capture progress, low byte)
+                 6: {7'b0, rsp_wptr[8]} (1 => 256-B buffer full/stopped)
+                 8..23: ATR capture buffer (16 B)
+  SEPH_ATR     read = 256-B response buffer, paged by SEPH_CTRL[1]:
+               byte index = {rsp_page, reg_bytecnt[6:0]} (0..127 / 128..255)
 *************************************************************************/
 
 module reg_seph_terminal #(
@@ -64,12 +69,14 @@ module reg_seph_terminal #(
 
    // ---- config / command ------------------------------------------------
    reg        enable;
+   reg        rsp_page;                // SEPH_CTRL[1]: which 128-B half of rsp[] SEPH_ATR returns
    reg  [7:0] cmd_data;
    reg        cmd_valid;               // 1-cycle strobe to the terminal
 
    always @(posedge clk_usb) begin
       if (reset) begin
          enable    <= 1'b0;
+         rsp_page  <= 1'b0;
          cmd_valid <= 1'b0;
       end
       else begin
@@ -77,7 +84,7 @@ module reg_seph_terminal #(
          if (reg_write) begin
             case (reg_address)
                `SEPH_CMD:  begin cmd_data <= reg_datai; cmd_valid <= 1'b1; end
-               `SEPH_CTRL: enable <= reg_datai[0];
+               `SEPH_CTRL: begin enable <= reg_datai[0]; rsp_page <= reg_datai[1]; end
             endcase
          end
       end
@@ -136,21 +143,24 @@ module reg_seph_terminal #(
 
    // ---- Response capture: SE->MCU bytes following each injected CAPDU ------
    // On every inject commit, (re)start capture at offset 0 and record card
-   // bytes until the 128-byte buffer fills, then stop. Holds the RAPDU (tag
+   // bytes until the 256-byte buffer fills, then stop. Holds the RAPDU (tag
    // 0x53 ...) the SE sends back, so the host can read responses (deviceNonce,
-   // SW, certificate bytes). Distributed-RAM + COMBINATIONAL read, exactly like
-   // the fixed OLED slave -> immune to the 4-byte DWORD read-burst skip that a
-   // registered BRAM read hits. Read via the SEPH_ATR address (repurposed);
-   // the ATR moves to SEPH_STATUS byte offsets 8..23.
+   // SW, certificate bytes incl. the FULL E0 52 80 signature, 140-141 B).
+   // Distributed-RAM + COMBINATIONAL read, exactly like the fixed OLED slave ->
+   // immune to the 4-byte DWORD read-burst skip that a registered BRAM read
+   // hits. Read via the SEPH_ATR address (repurposed); the ATR moves to
+   // SEPH_STATUS byte offsets 8..23. 256 B > the 128-B register-transaction cap
+   // (7-bit reg_bytecnt), so SEPH_ATR is paged: SEPH_CTRL[1]=rsp_page selects
+   // the low/high 128-B half (mirrors reg_sca_display's DISP_PAGESEL).
    (* ram_style = "distributed" *)
-   reg [7:0] rsp [0:127];
-   reg [7:0] rsp_wptr;                        // 0..128; bit7 set => full/stopped
+   reg [7:0] rsp [0:255];
+   reg [8:0] rsp_wptr;                        // 0..256; bit8 set => full/stopped
    always @(posedge clk_usb) begin
-      if (reset)             rsp_wptr <= 8'd128;   // idle = stopped
-      else if (inj_commit_w) rsp_wptr <= 8'd0;     // (re)arm on each inject
-      else if (!rsp_wptr[7] && o_card_rx_valid) begin
-         rsp[rsp_wptr[6:0]] <= o_card_rx;
-         rsp_wptr <= rsp_wptr + 8'd1;
+      if (reset)             rsp_wptr <= 9'd256;   // idle = stopped
+      else if (inj_commit_w) rsp_wptr <= 9'd0;     // (re)arm on each inject
+      else if (!rsp_wptr[8] && o_card_rx_valid) begin
+         rsp[rsp_wptr[7:0]] <= o_card_rx;
+         rsp_wptr <= rsp_wptr + 9'd1;
       end
    end
 
@@ -167,7 +177,8 @@ module reg_seph_terminal #(
          2: status_byte = o_card_bytes[7:0];
          3: status_byte = o_card_bytes[15:8];
          4: status_byte = {3'b0, atr_wptr};
-         5: status_byte = rsp_wptr;             // response-capture progress (#bytes, 128=done)
+         5: status_byte = rsp_wptr[7:0];        // response-capture progress low byte (#bytes)
+         6: status_byte = {7'b0, rsp_wptr[8]};  // progress bit8: 1 => buffer full/stopped (256)
          default: status_byte = 8'd0;
       endcase
    end
@@ -176,9 +187,9 @@ module reg_seph_terminal #(
       if (reg_read) begin
          case (reg_address)
             `SEPH_CMD:    reg_datao = cmd_data;
-            `SEPH_CTRL:   reg_datao = {7'b0, enable};
+            `SEPH_CTRL:   reg_datao = {6'b0, rsp_page, enable};
             `SEPH_STATUS: reg_datao = status_byte;
-            `SEPH_ATR:    reg_datao = rsp[reg_bytecnt[6:0]];   // repurposed: response buffer
+            `SEPH_ATR:    reg_datao = rsp[{rsp_page, reg_bytecnt[6:0]}]; // paged response buffer
             default:      reg_datao = 8'd0;
          endcase
       end
