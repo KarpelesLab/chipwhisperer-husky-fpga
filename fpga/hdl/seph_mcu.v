@@ -160,6 +160,10 @@ module seph_mcu #(
     input  wire        inj_commit,
     output wire        inj_busy,
     output reg         inj_bad,
+    // High for the whole duration an injected event (e.g. a CAPDU) is on the
+    // wire: a per-operation trigger for the ADC, deterministic in this clock
+    // domain (and the SE runs on the same clock) -> sample-aligned SCA.
+    output wire        inj_trig,
 
     output reg         active,
     // The SE has ended a turn since `start`: it took the session.
@@ -357,6 +361,7 @@ module seph_mcu #(
     reg        inj_want = 1'b0;     // committed, not yet started
     reg        inj_refuse = 1'b0;   // this run started while one was pending
     assign inj_busy = inj_want || (sending && kind == K_INJECT);
+    assign inj_trig = sending && (kind == K_INJECT);
 
     // On our turn, what goes, in priority order; see the header.
     wire       tick_due  = since_tick >= interval;

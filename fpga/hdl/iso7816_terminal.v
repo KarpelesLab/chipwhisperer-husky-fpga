@@ -205,7 +205,9 @@ module iso7816_terminal #(
     output wire        o_seph_started,
     output wire        o_seph_active,
     output wire [7:0]  o_seph_last_tag,
-    output wire [15:0] o_card_bytes
+    output wire [15:0] o_card_bytes,
+    output wire        o_inj_trig,      // seph_mcu: high while an injected event is on the wire
+    output wire        o_inj_commit     // seph_mcu: 1-cycle pulse when an inject is committed
 );
     assign o_card_rx       = card_rx;
     assign o_card_rx_valid = card_rx_valid;
@@ -215,6 +217,8 @@ module iso7816_terminal #(
     assign o_seph_active   = seph_active;
     assign o_seph_last_tag = seph_last_tag;
     assign o_card_bytes    = bytes_q;
+    assign o_inj_trig      = seph_inj_trig;
+    assign o_inj_commit    = inj_commit;
     localparam integer SLOW_DIV = ETU_CYCLES * CARD_DIV;
     localparam integer FAST_DIV = FAST_ETU_CYCLES * CARD_DIV;
     localparam [15:0]  SLOW_DIV16 = SLOW_DIV;
@@ -571,7 +575,7 @@ module iso7816_terminal #(
     reg       have_hi  = 1'b0;
     reg [3:0] hi_nib   = 4'd0;
     reg         usb_plugged = 1'b0;
-    wire        seph_usb_on, seph_inj_busy, seph_inj_bad;
+    wire        seph_usb_on, seph_inj_busy, seph_inj_bad, seph_inj_trig;
     wire        inj_start, inj_valid, inj_end, inj_commit, inj_odd;
     always @(posedge sys) begin
         if (!rst_n)                                usb_plugged <= 1'b0;
@@ -588,7 +592,7 @@ module iso7816_terminal #(
         .usb_plugged(usb_plugged), .usb_on(seph_usb_on),
         .inj_start(inj_start), .inj_data({hi_nib, hex_val(cmd_data)}),
         .inj_valid(inj_valid), .inj_commit(inj_commit),
-        .inj_busy(seph_inj_busy), .inj_bad(seph_inj_bad),
+        .inj_busy(seph_inj_busy), .inj_bad(seph_inj_bad), .inj_trig(seph_inj_trig),
         .active(seph_active), .started(seph_started),
         .rx_packets(seph_rx_packets), .tx_events(seph_tx_events),
         .last_rx_tag(seph_last_tag), .ms());

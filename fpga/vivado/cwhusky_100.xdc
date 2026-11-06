@@ -24,6 +24,11 @@ set_property CLOCK_DEDICATED_ROUTE FALSE [get_nets {U_trace_top/U_trace_clock_dr
 set_property CLOCK_DEDICATED_ROUTE BACKBONE [get_nets reg_clockglitch/U_clockglitch/glitch_mmcm1_clk_out]
 #set_property CLOCK_DEDICATED_ROUTE ANY_CMT_COLUMN [get_nets reg_clockglitch/U_clockglitch/glitch_mmcm2_clk_out]
 set_property CLOCK_DEDICATED_ROUTE ANY_CMT_COLUMN [get_nets U_trace_top/trace_clk_selected]
+# fe_clk (U_fe_clock_mux2.O) fans to U_fifo_clk_mux.I0 (adjacent) AND reg_la/sourceclk_mux3.I1
+# (non-adjacent) -> rule_cascaded_bufg FAILED after the seph inj_trig/response-buffer additions
+# nudged placement. fe_clk is the trace front-end clock, forced off by set_case_analysis and
+# unused here (no TraceWhisperer / LA), so relaxing its dedicated routing is harmless.
+set_property CLOCK_DEDICATED_ROUTE ANY_CMT_COLUMN [get_nets -of_objects [get_pins U_trace_top/U_fe_clock_mux2/O]]
 
 set_case_analysis 1 [get_pins reg_clockglitch/sourceclk_mux1/S]
 set_case_analysis 0 [get_pins reg_clockglitch/sourceclk_mux2/S]

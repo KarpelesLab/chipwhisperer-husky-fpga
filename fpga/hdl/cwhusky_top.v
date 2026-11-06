@@ -590,7 +590,7 @@ module cwhusky_top(
         .edge_trigger_active    (edge_trigger_active),
         .adc_trigger_active     (adc_trigger_active),
         .bb_trigger_active      (bb_trigger_active),
-        .trigger_advio_i        (1'b0),
+        .trigger_advio_i        (seph_inj_trig),
         .trigger_decodedio_i    (trace_trig_out),
         .trigger_trace_i        (trace_trig_out),
         .trigger_adc_i          (trigger_adc),
@@ -875,6 +875,7 @@ module cwhusky_top(
    // -------------------------------------------------------------------
    wire [7:0] read_data_seph;
    wire seph_enable, seph_clk_card, seph_vcc_en, seph_rst_card, seph_io_oe, seph_io_o;
+   wire seph_inj_trig;   // per-inject ADC trigger (CAPDU on the wire) -> trigger_advio_i
    reg_seph_terminal #(
         .pBYTECNT_SIZE  (pBYTECNT_SIZE)
    ) reg_seph_terminal (
@@ -892,7 +893,8 @@ module cwhusky_top(
         .rst_card       (seph_rst_card),
         .io_oe          (seph_io_oe),
         .io_o           (seph_io_o),
-        .io_i           (target_io3)
+        .io_i           (target_io3),
+        .inj_trig       (seph_inj_trig)
    );
    // Terminal drives the SE UART on TIO3 (open-drain: pulls low or hi-Z) when
    // enabled; the ChipWhisperer's own TIO3 driver must be released by the host.

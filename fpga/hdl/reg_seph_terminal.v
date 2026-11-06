@@ -55,7 +55,11 @@ module reg_seph_terminal #(
    output wire         rst_card,       // -> target_PDIC (HIGH=run, LOW=reset)
    output wire         io_oe,          // target_io3 drive-enable
    output wire         io_o,           // target_io3 drive value (const 0)
-   input  wire         io_i            // target_io3 as read
+   input  wire         io_i,           // target_io3 as read
+
+   // Per-inject ADC trigger: high while an injected event (CAPDU) is on the
+   // wire. Routed to trigger_advio_i in cwhusky_top for sample-aligned SCA.
+   output wire         inj_trig
 );
 
    // ---- config / command ------------------------------------------------
@@ -108,8 +112,10 @@ module reg_seph_terminal #(
       .o_card_rx(o_card_rx), .o_card_rx_valid(o_card_rx_valid),
       .o_state(o_state), .o_card_active(o_card_active),
       .o_seph_started(o_seph_started), .o_seph_active(o_seph_active),
-      .o_seph_last_tag(o_seph_last_tag), .o_card_bytes(o_card_bytes)
+      .o_seph_last_tag(o_seph_last_tag), .o_card_bytes(o_card_bytes),
+      .o_inj_trig(inj_trig), .o_inj_commit(inj_commit_w)
    );
+   wire inj_commit_w;
 
    // ---- ATR capture: first 16 card bytes after each 'A' -----------------
    // ram_style=registers: 16 bytes is tiny, and forcing FFs avoids the
@@ -128,16 +134,40 @@ module reg_seph_terminal #(
       end
    end
 
+   // ---- Response capture: SE->MCU bytes following each injected CAPDU ------
+   // On every inject commit, (re)start capture at offset 0 and record card
+   // bytes until the 128-byte buffer fills, then stop. Holds the RAPDU (tag
+   // 0x53 ...) the SE sends back, so the host can read responses (deviceNonce,
+   // SW, certificate bytes). Distributed-RAM + COMBINATIONAL read, exactly like
+   // the fixed OLED slave -> immune to the 4-byte DWORD read-burst skip that a
+   // registered BRAM read hits. Read via the SEPH_ATR address (repurposed);
+   // the ATR moves to SEPH_STATUS byte offsets 8..23.
+   (* ram_style = "distributed" *)
+   reg [7:0] rsp [0:127];
+   reg [7:0] rsp_wptr;                        // 0..128; bit7 set => full/stopped
+   always @(posedge clk_usb) begin
+      if (reset)             rsp_wptr <= 8'd128;   // idle = stopped
+      else if (inj_commit_w) rsp_wptr <= 8'd0;     // (re)arm on each inject
+      else if (!rsp_wptr[7] && o_card_rx_valid) begin
+         rsp[rsp_wptr[6:0]] <= o_card_rx;
+         rsp_wptr <= rsp_wptr + 8'd1;
+      end
+   end
+
    // ---- read side -------------------------------------------------------
+   wire [6:0] atr_idx = reg_bytecnt - 7'd8;      // ATR at SEPH_STATUS offset 8..23
    reg [7:0] status_byte;
    always @(*) begin
-      case (reg_bytecnt)
+      if (reg_bytecnt >= 7'd8 && reg_bytecnt < 7'd24)
+         status_byte = atr[atr_idx[3:0]];
+      else case (reg_bytecnt)
          0: status_byte = {o_seph_active, o_seph_started, o_card_active,
                            2'b0, o_state};
          1: status_byte = o_seph_last_tag;
          2: status_byte = o_card_bytes[7:0];
          3: status_byte = o_card_bytes[15:8];
          4: status_byte = {3'b0, atr_wptr};
+         5: status_byte = rsp_wptr;             // response-capture progress (#bytes, 128=done)
          default: status_byte = 8'd0;
       endcase
    end
@@ -148,7 +178,7 @@ module reg_seph_terminal #(
             `SEPH_CMD:    reg_datao = cmd_data;
             `SEPH_CTRL:   reg_datao = {7'b0, enable};
             `SEPH_STATUS: reg_datao = status_byte;
-            `SEPH_ATR:    reg_datao = atr[reg_bytecnt[3:0]];
+            `SEPH_ATR:    reg_datao = rsp[reg_bytecnt[6:0]];   // repurposed: response buffer
             default:      reg_datao = 8'd0;
          endcase
       end
